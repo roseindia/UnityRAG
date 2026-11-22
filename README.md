@@ -1,1 +1,2 @@
 # UnityRAG
+Enterprise RAG Application
