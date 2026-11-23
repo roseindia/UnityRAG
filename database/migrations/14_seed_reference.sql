@@ -1,0 +1,108 @@
+-- =============================================================================
+-- 14  Reference seed data (idempotent): permission catalogue, platform roles,
+--     subscription plans, platform settings, the built-in local AI provider and
+--     its catalogue entries.  No tenant data is seeded here - tenants are
+--     provisioned through the Platform Admin API / scripts/create_admin.py.
+-- The migration role is subject to FORCE RLS like every other role, so the seed
+-- explicitly (and transaction-locally) adopts the platform-admin context.
+-- =============================================================================
+SELECT set_config('app.current_access_mode', 'platform', true),
+       set_config('app.current_platform_role', 'platform_super_admin', true);
+
+INSERT INTO iam.permissions (permission_code, description, category, is_admin) VALUES
+  ('documents.read',            'Read documents the user is entitled to', 'content', false),
+  ('documents.upload',          'Upload documents / new versions', 'content', false),
+  ('documents.download',        'Download original files of entitled documents', 'content', false),
+  ('documents.manage',          'Edit metadata, lifecycle and versions of owned documents', 'content', false),
+  ('documents.delete',          'Withdraw / delete documents', 'content', false),
+  ('collections.read',          'List collections the user may use', 'content', false),
+  ('search.use',                'Use vector, full-text and hybrid search', 'rag', false),
+  ('chat.use',                  'Use the RAG assistant', 'rag', false),
+  ('feedback.submit',           'Rate answers and report issues', 'rag', false),
+  ('feedback.review',           'Triage and resolve feedback (human review)', 'rag', true),
+  ('admin.dashboard.view',      'View the tenant admin dashboard', 'admin', true),
+  ('admin.users.manage',        'Create, edit, activate, deactivate users; reset passwords; revoke sessions', 'admin', true),
+  ('admin.roles.manage',        'Manage custom roles, permissions and role assignments', 'admin', true),
+  ('admin.departments.manage',  'Manage departments and teams', 'admin', true),
+  ('admin.groups.manage',       'Manage user groups and membership', 'admin', true),
+  ('admin.documents.manage',    'Document inventory, reprocessing, re-indexing, access, archival', 'admin', true),
+  ('admin.collections.manage',  'Create / update / delete collections and their permissions', 'admin', true),
+  ('admin.ingestion.manage',    'Monitor and retry ingestion jobs', 'admin', true),
+  ('admin.ai_config.manage',    'Change tenant AI model configuration', 'admin', true),
+  ('admin.rag_config.manage',   'Change tenant RAG configuration', 'admin', true),
+  ('admin.analytics.view',      'View tenant analytics and reports', 'admin', true),
+  ('admin.usage.view',          'View usage, quotas and estimated costs', 'admin', true),
+  ('admin.audit.view',          'View and export tenant audit logs', 'admin', true),
+  ('admin.settings.manage',     'Manage tenant settings', 'admin', true),
+  ('admin.reports.export',      'Export authorised reports as CSV', 'admin', true),
+  ('evaluation.manage',         'Manage evaluation datasets', 'admin', true),
+  ('evaluation.run',            'Run RAG evaluations', 'admin', true),
+  ('department.analytics.view', 'View analytics of the own department (department administrator)', 'admin', true)
+ON CONFLICT (permission_code) DO UPDATE SET description = EXCLUDED.description, category = EXCLUDED.category,
+                                            is_admin = EXCLUDED.is_admin;
+
+INSERT INTO platform.platform_permissions (permission_code, description) VALUES
+  ('platform.dashboard.view',  'View platform dashboard'),
+  ('platform.tenants.view',    'View tenants and tenant statistics'),
+  ('platform.tenants.manage',  'Create, edit, activate, suspend, deactivate, archive tenants; manage tenant admins'),
+  ('platform.plans.manage',    'Manage subscription plans and tenant subscriptions'),
+  ('platform.quotas.manage',   'Configure tenant quotas and feature flags'),
+  ('platform.users.manage',    'Manage platform administrators'),
+  ('platform.ai.manage',       'Manage AI providers and the model catalogue'),
+  ('platform.monitoring.view', 'View system monitoring and background jobs'),
+  ('platform.audit.view',      'View platform audit logs'),
+  ('platform.security.view',   'View security events and privileged access'),
+  ('platform.settings.manage', 'Manage platform settings'),
+  ('platform.break_glass.use', 'Request time-limited break-glass access to tenant data')
+ON CONFLICT (permission_code) DO UPDATE SET description = EXCLUDED.description;
+
+INSERT INTO platform.platform_roles (code, name, description) VALUES
+  ('platform_super_admin', 'Platform Super Administrator', 'Full platform administration incl. platform users and break-glass'),
+  ('platform_admin',       'Platform Administrator', 'Tenant lifecycle, plans, quotas, AI catalogue'),
+  ('platform_operator',    'Platform Operator', 'Monitoring and background jobs, read-only tenant view'),
+  ('platform_security',    'Platform Security Officer', 'Audit, security events and privileged-access review'),
+  ('platform_support',     'Platform Support', 'Read-only tenant and monitoring view')
+ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name, description = EXCLUDED.description;
+
+INSERT INTO platform.platform_role_permissions (role_id, permission_code)
+SELECT r.role_id, p.permission_code FROM platform.platform_roles r JOIN platform.platform_permissions p ON
+   (r.code = 'platform_super_admin')
+OR (r.code = 'platform_admin' AND p.permission_code NOT IN ('platform.users.manage', 'platform.break_glass.use'))
+OR (r.code = 'platform_operator' AND p.permission_code IN ('platform.dashboard.view', 'platform.monitoring.view', 'platform.tenants.view'))
+OR (r.code = 'platform_security' AND p.permission_code IN ('platform.dashboard.view', 'platform.audit.view', 'platform.security.view', 'platform.tenants.view'))
+OR (r.code = 'platform_support' AND p.permission_code IN ('platform.tenants.view', 'platform.monitoring.view'))
+ON CONFLICT DO NOTHING;
+
+INSERT INTO platform.tenant_plans (code, name, description, max_users, max_documents, max_storage_bytes,
+  max_document_size_bytes, monthly_ai_tokens, monthly_ai_requests, max_concurrent_chats, max_ingestion_jobs,
+  max_collections, features, monthly_price) VALUES
+  ('trial',        'Trial',        '30-day evaluation',            10,     200,     1073741824,     20971520,   500000,    2000,   5,   5,  5,
+     '{"break_glass_support": false, "tenant_ai_providers": false}', 0),
+  ('starter',      'Starter',      'Small teams',                  50,    5000,    21474836480,    52428800,  5000000,   20000,  20,  20,  25,
+     '{"break_glass_support": true, "tenant_ai_providers": false}', 990),
+  ('professional', 'Professional', 'Departments and business units', 500, 100000, 536870912000, 104857600, 50000000,  200000, 100, 100, 200,
+     '{"break_glass_support": true, "tenant_ai_providers": true}', 4990),
+  ('enterprise',   'Enterprise',   'Enterprise-wide deployment',   25000, 2000000, 5497558138880, 524288000, 500000000, 2000000, 3000, 500, 2000,
+     '{"break_glass_support": true, "tenant_ai_providers": true}', 24990)
+ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO platform.platform_settings (key, value) VALUES
+  ('global_ai_policy', '{"allow_external_providers": true, "require_citations": true, "regulated_decisions": "prohibited"}'),
+  ('global_rate_limits', '{"requests_per_minute_per_user": 120, "chat_per_minute_per_user": 20}'),
+  ('cost_currency', '"USD"')
+ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO platform.ai_providers (code, name, provider_type, base_url, region, is_enabled, allow_tenant_override, health_status)
+VALUES ('local', 'Built-in local models (offline)', 'local', NULL, 'default', true, false, 'healthy')
+ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO platform.model_catalogue (provider_id, model_name, model_version, purpose, dimensions, context_window,
+                                      input_cost_per_1k, output_cost_per_1k, risk_class, status, is_default)
+SELECT p.provider_id, m.model_name, '1', m.purpose, m.dims, m.ctx, 0, 0, 'low', 'active', true
+  FROM platform.ai_providers p,
+       (VALUES ('extractive-v1', 'chat', NULL::integer, 8192),
+               ('hashing-v1', 'embedding', 384, 8192),
+               ('lexical-overlap-v1', 'rerank', NULL, 8192),
+               ('rule-rewriter-v1', 'rewrite', NULL, 8192)) AS m(model_name, purpose, dims, ctx)
+ WHERE p.code = 'local'
+ON CONFLICT (provider_id, model_name, model_version, purpose) DO NOTHING;

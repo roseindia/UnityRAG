@@ -1,0 +1,146 @@
+import { expect, test, type Page } from '@playwright/test'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { customRoles, installFake, platform, state } from './fakeBackend'
+
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const OUT = path.resolve(HERE, '../../docs/user-guide/images-perm')
+const H = 1000
+const shot = async (p: Page, name: string, full = false) => {
+  await p.evaluate(() => document.documentElement.setAttribute('data-hide-toasts', '1'))
+  await p.screenshot({ path: path.join(OUT, `${name}.png`), clip: full ? { x: 0, y: 0, width: 1280, height: H } : { x: 256, y: 0, width: 1024, height: H } })
+  await p.evaluate(() => document.documentElement.removeAttribute('data-hide-toasts'))
+}
+const nav = (p: Page, label: string) => p.getByRole('navigation', { name: /navigation$/ }).first().getByRole('link', { name: label, exact: true }).click()
+const dlg = (p: Page) => p.getByRole('dialog')
+async function signIn(p: Page, email: string) {
+  await p.getByLabel('Email').fill(email)
+  await p.getByLabel('Password').fill('Sample-Passw0rd!')
+  await p.getByRole('button', { name: 'Sign in' }).click()
+}
+async function signOut(p: Page) {
+  await p.getByRole('button', { name: 'User menu' }).click()
+  await p.getByRole('menuitem', { name: 'Sign out' }).click()
+  await expect(p).toHaveURL(/\/login/)
+}
+
+test('capture permission and model approval screenshots', async ({ page: p }) => {
+  const mk = (id: string, persona: string, email: string, name: string, roles: string[]) => ({ user_id: id, persona, email, display_name: name, user_type: 'employee', department_id: null, roles, status: 'active', lines_of_business: ['motor'], jurisdictions: ['US'], clearance_rank: 1, group_ids: [] as string[], last_active_at: null })
+  state.users.push(mk('u-alice', 'alice', 'alice.admin@acme.example', 'Alice Admin', ['tenant_admin']), mk('u-dana', 'dana', 'dana.manager@acme.example', 'Dana Manager', ['member']))
+  customRoles.length = 0
+  platform.providers.splice(1)                                   // only the built-in provider is registered at the start
+  platform.models = platform.models.filter((m) => m.provider === 'local')
+  await p.setViewportSize({ width: 1280, height: H })
+  await installFake(p)
+  await p.addInitScript(() => { const st = document.createElement('style'); st.textContent = 'html[data-hide-toasts] [data-sonner-toaster]{visibility:hidden !important}'; document.addEventListener('DOMContentLoaded', () => document.head.appendChild(st)) })
+  await p.goto('/login')
+
+  // ------------------------------------------------ Part 1: the tenant administrator grants the permission
+  await signIn(p, 'alice.admin@acme.example')
+  await expect(p.getByRole('heading', { name: /Welcome/ })).toBeVisible()
+  await p.getByRole('link', { name: 'Admin', exact: true }).click()
+  await nav(p, 'Users')
+  await expect(p.getByRole('link', { name: 'Dana Manager' })).toBeVisible()
+  await p.waitForTimeout(400); await shot(p, 'b1-users')
+  await p.getByRole('link', { name: 'Dana Manager' }).click()
+  await p.getByRole('tab', { name: 'Effective permissions' }).click()
+  await expect(p.getByText('search.use').first()).toBeVisible()
+  await p.waitForTimeout(300); await shot(p, 'b2-effective-before')
+
+  await nav(p, 'Roles & permissions')
+  await expect(p.getByRole('heading', { name: 'Roles and permissions' })).toBeVisible()
+  await p.waitForTimeout(500); await shot(p, 'b3-roles-matrix')
+  await p.getByRole('button', { name: 'New custom role' }).click()
+  await dlg(p).getByLabel('Code').fill('ai_config_manager')
+  await dlg(p).getByLabel('Name').fill('AI Configuration Manager')
+  await dlg(p).getByLabel('Description').fill('Chooses AI models and tunes retrieval')
+  await dlg(p).getByLabel('admin.ai_config.manage').check()
+  await dlg(p).getByLabel('admin.rag_config.manage').check()
+  await p.waitForTimeout(300); await shot(p, 'b4-new-role')
+  await dlg(p).getByRole('button', { name: 'Save role' }).click()
+  await expect(p.getByText('Role saved.')).toBeVisible()
+  await p.waitForTimeout(500); await shot(p, 'b5-role-created')
+
+  await nav(p, 'Users')
+  await p.getByRole('link', { name: 'Dana Manager' }).click()
+  await p.getByRole('tab', { name: 'Roles' }).click()
+  await p.getByLabel('Add a role').selectOption({ label: 'AI Configuration Manager' })
+  await p.waitForTimeout(300); await shot(p, 'b6-add-role')
+  await p.getByRole('button', { name: 'Assign' }).click()
+  await expect(p.getByText('Role assigned.')).toBeVisible()
+  await p.waitForTimeout(500); await shot(p, 'b7-role-assigned')
+  await p.getByRole('tab', { name: 'Effective permissions' }).click()
+  await expect(p.getByText('admin.ai_config.manage')).toBeVisible()
+  await p.waitForTimeout(300); await shot(p, 'b8-effective-after')
+  await signOut(p)
+
+  // ------------------------------------------------ Part 2: the platform administrator approves the models
+  await signIn(p, 'platform@example.test')
+  await expect(p).toHaveURL(/\/platform/)
+  await nav(p, 'AI providers')
+  await expect(p.getByRole('heading', { name: 'AI providers' })).toBeVisible()
+  await p.waitForTimeout(400); await shot(p, 'c1-providers-empty')
+  const addProvider = async (code: string, name: string, url: string) => {
+    await p.getByRole('button', { name: 'New provider' }).click()
+    const d = dlg(p)
+    await d.getByLabel('Code').fill(code)
+    await d.getByLabel('Name').fill(name)
+    await d.getByLabel('Type').selectOption({ label: 'Ollama' })
+    await d.getByLabel('Base URL').fill(url)
+    await d.getByLabel('Region').fill('local')
+    return d
+  }
+  let d = await addProvider('ollama-chat', 'Ollama (chat)', 'http://host.docker.internal:11434/v1')
+  await shot(p, 'c2-new-provider')
+  await d.getByRole('button', { name: 'Save provider' }).click()
+  await expect(p.getByText('Provider saved.')).toBeVisible()
+  await expect(dlg(p)).toBeHidden()
+  d = await addProvider('ollama-embed', 'Ollama (embeddings)', 'http://host.docker.internal:11434')
+  await d.getByRole('button', { name: 'Save provider' }).click()
+  await expect(dlg(p)).toBeHidden()
+  await expect(p.getByText('Ollama (embeddings)').first()).toBeVisible()
+  await p.getByRole('button', { name: 'Health check' }).nth(1).click()
+  await expect(p.getByText('reachable').first()).toBeVisible()
+  await p.waitForTimeout(300); await shot(p, 'c3-providers-list')
+
+  await nav(p, 'Model catalogue')
+  await expect(p.getByRole('heading', { name: 'Model catalogue' })).toBeVisible()
+  await p.waitForTimeout(400); await shot(p, 'c4-models-list')
+  await p.getByRole('button', { name: 'New model' }).click()
+  d = dlg(p)
+  await d.getByLabel('Provider').selectOption({ label: 'Ollama (chat)' })
+  await d.getByLabel('Model name').fill('llama3.1:8b')
+  await d.getByLabel('Purpose').selectOption({ label: 'Chat' })
+  await d.getByLabel('Context window').fill('8192')
+  await shot(p, 'c5-new-model')
+  await d.getByRole('button', { name: 'Add model' }).click()
+  await expect(p.getByText('Model added as proposed.')).toBeVisible()
+  await expect(dlg(p)).toBeHidden()
+  await p.getByRole('button', { name: 'New model' }).click()
+  d = dlg(p)
+  await d.getByLabel('Provider').selectOption({ label: 'Ollama (embeddings)' })
+  await d.getByLabel('Model name').fill('nomic-embed-text')
+  await d.getByLabel('Purpose').selectOption({ label: 'Embedding' })
+  await d.getByLabel('Embedding dimensions').fill('768')
+  await d.getByRole('button', { name: 'Add model' }).click()
+  await expect(dlg(p)).toBeHidden()
+  await expect(p.getByText('nomic-embed-text').first()).toBeVisible()
+  await p.waitForTimeout(400); await shot(p, 'c6-models-proposed')
+  await p.getByLabel('Status of llama3.1:8b').selectOption({ label: 'Approved' })
+  await p.getByLabel('Status of nomic-embed-text').selectOption({ label: 'Approved' })
+  await expect(p.getByText('Model updated.').first()).toBeVisible()
+  await p.waitForTimeout(500); await shot(p, 'c7-models-approved')
+  await signOut(p)
+
+  // ------------------------------------------------ Part 3: the new configuration manager chooses models
+  await signIn(p, 'dana.manager@acme.example')
+  await expect(p.getByRole('heading', { name: /Welcome/ })).toBeVisible()
+  await p.waitForTimeout(300); await shot(p, 'd1-dana-home', true)
+  await p.getByRole('link', { name: 'Admin', exact: true }).click()
+  await p.waitForTimeout(300); await shot(p, 'd2-dana-admin-menu', true)
+  await nav(p, 'AI & RAG configuration')
+  await expect(p.getByRole('heading', { name: 'AI and RAG configuration' })).toBeVisible()
+  await p.getByLabel('Chat provider').selectOption({ label: 'ollama-chat' })
+  await p.getByLabel('Chat model').selectOption({ label: 'llama3.1:8b' })
+  await p.waitForTimeout(300); await shot(p, 'd3-dana-models')
+})

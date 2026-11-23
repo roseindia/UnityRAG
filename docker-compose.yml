@@ -1,0 +1,94 @@
+# Local / single-host deployment.  `docker compose up -d --build`
+# Services: PostgreSQL 16 + pgvector, Redis, one-shot migrate, API, ingestion worker, scheduler, Nginx,
+# optional ClamAV (`--profile security`).
+x-backend-env: &backend-env
+  DB_HOST: postgres
+  REDIS_URL: redis://redis:6379/0
+  CLAMAV_HOST: clamav
+  # The shared `storage` volume is mounted here and is writable by the app user. This overrides a
+  # local-development value such as ./var/storage in backend/.env, which is not writable in the container.
+  STORAGE_ROOT: /srv/var/storage
+
+# Long-running services (api / worker / scheduler) never receive the superuser
+# DSN or the migration password: both are blanked here even if backend/.env has
+# them.  Only the one-shot `migrate` service gets them (docs/security/DATABASE_SECURITY.md).
+x-backend: &backend
+  build: {context: ., dockerfile: Dockerfile}
+  env_file: [backend/.env]
+  environment:
+    <<: *backend-env
+    DB_SUPERUSER_DSN: ""
+    DB_MIGRATION_PASSWORD: ""
+  volumes: [storage:/srv/var/storage]
+  depends_on:
+    postgres: {condition: service_healthy}
+    redis: {condition: service_healthy}
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.1-pg16
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["6379:6379"]
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    <<: *backend
+    environment:
+      <<: *backend-env
+      DB_SUPERUSER_DSN: host=postgres user=postgres password=${POSTGRES_PASSWORD:-postgres} dbname=postgres
+    command: ["sh", "-c", "python -m app.database.bootstrap && alembic upgrade head"]
+    restart: "no"
+
+  api:
+    <<: *backend
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    ports: ["8000:8000"]
+
+  worker:
+    <<: *backend
+    command: ["celery", "-A", "app.workers.celery_app", "worker", "-Q", "ingestion,maintenance", "--loglevel=INFO", "--concurrency=2"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.workers.celery_app inspect ping -d celery@$$HOSTNAME || exit 1"]
+      interval: 60s
+
+  scheduler:
+    <<: *backend
+    command: ["celery", "-A", "app.workers.celery_app", "beat", "--loglevel=INFO", "--schedule", "/tmp/celerybeat-schedule"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+  nginx:
+    image: nginx:1.27-alpine
+    volumes: ["./infrastructure/nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro"]
+    ports: ["8080:80"]
+    depends_on: [api]
+
+  clamav:
+    image: clamav/clamav:1.4
+    profiles: ["security"]
+    ports: ["3310:3310"]
+
+volumes:
+  pgdata: {}
+  redisdata: {}
+  storage: {}

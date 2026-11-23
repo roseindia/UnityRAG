@@ -1,0 +1,6 @@
+const fs = require('fs'); let s = fs.readFileSync('fakeBackend.ts', 'utf8')
+const bs = String.fromCharCode(92)
+s = s.replace("/^/admin/config$/", "/^" + bs + "/admin" + bs + "/config$/")
+s = s.replace("/^/admin/config/(ai|rag)$/", "/^" + bs + "/admin" + bs + "/config" + bs + "/(ai|rag)$/")
+s = s.replace("/^/admin/config/history/(ai|rag)$/", "/^" + bs + "/admin" + bs + "/config" + bs + "/history" + bs + "/(ai|rag)$/")
+fs.writeFileSync('fakeBackend.ts', s); console.log(s.match(/admin.{0,3}config.{0,40}/g))

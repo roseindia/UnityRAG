@@ -1,0 +1,27 @@
+[project]
+name = "unityrag-backend"
+version = "1.0.0"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 140
+target-version = "py312"
+extend-exclude = ["alembic/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "DTZ"]
+ignore = [
+  "B008",   # FastAPI dependency injection uses Depends() in argument defaults by design
+  "S101",   # assert is used in tests and for internal invariants
+  "S608",   # SQL is built only from fixed fragments + bound parameters (reviewed, see ADR-013)
+  "E501",   # long SQL literals are kept on one line for readability; formatter-free
+  "E741",   # `l` is used for "line" in parsing loops
+  "UP046",  # pydantic Generic models keep the explicit Generic[T] form
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106", "S108", "S311", "E731", "B905"]
+"../scripts/**" = ["E701", "E702", "E402", "S311", "B905", "B007"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

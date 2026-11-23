@@ -1,0 +1,5 @@
+const fs = require('fs'); let s = fs.readFileSync('capture-ai.spec.ts', 'utf8')
+s = s.replace("fullPage: full, ...(full ? {} : { clip: { x: 256, y: 0, width: 1024, height: 780 } })", "clip: { x: 256, y: 0, width: 1024, height: 1100 }")
+s = s.replace("  await installFake(p)\n", "  await p.setViewportSize({ width: 1280, height: 1100 })\n  await installFake(p)\n")
+s = s.replace("const shot = async (p: Page, name: string, full = false)", "const shot = async (p: Page, name: string, _full = false)")
+fs.writeFileSync('capture-ai.spec.ts', s)

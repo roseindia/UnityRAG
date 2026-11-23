@@ -1,0 +1,72 @@
+-- =============================================================================
+-- 08  Search and access-path indexes (spec 10.4)
+-- Every index starts with tenant_id where the access path is tenant-scoped, so
+-- tenant predicates (explicit + RLS) are index-supported.
+--
+-- Vector indexes: one partial HNSW expression index per supported dimension,
+-- restricted to active generations (re-embedding builds the new generation
+-- side by side, then flips is_active - FR-081).  HNSW m=16, ef_construction=128
+-- (spec proposal).  Filtered ANN recall is protected at query time with
+-- pgvector 0.8 iterative scans (hnsw.iterative_scan = relaxed_order) plus
+-- tenant / ACL predicates; see docs/database/VECTOR_INDEXING.md.
+-- =============================================================================
+-- Full-text and exact identifier search
+CREATE INDEX IF NOT EXISTS chunks_fts_gin        ON content.document_chunks USING gin (content_tsv);
+CREATE INDEX IF NOT EXISTS chunks_identifiers_trgm ON content.document_chunks USING gin (identifiers gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS chunks_clause_trgm    ON content.document_chunks USING gin (clause_ref gin_trgm_ops);
+-- Permission / ABAC pre-filters
+CREATE INDEX IF NOT EXISTS chunks_allow_gin      ON content.document_chunks USING gin (allow_principals);
+CREATE INDEX IF NOT EXISTS chunks_juris_gin      ON content.document_chunks USING gin (jurisdictions);
+CREATE INDEX IF NOT EXISTS chunks_scope_btree    ON content.document_chunks (tenant_id, collection_id, lifecycle_state, line_of_business);
+CREATE INDEX IF NOT EXISTS chunks_version_btree  ON content.document_chunks (tenant_id, version_id, chunk_index);
+CREATE INDEX IF NOT EXISTS chunks_document_btree ON content.document_chunks (tenant_id, document_id);
+CREATE INDEX IF NOT EXISTS chunks_effective_btree ON content.document_chunks (tenant_id, effective_from, effective_to);
+
+-- Vectors (cosine).  Additional operator classes (vector_ip_ops / vector_l2_ops)
+-- can be added per dimension when a tenant selects that metric.
+CREATE INDEX IF NOT EXISTS emb_hnsw_384  ON content.chunk_embeddings USING hnsw ((embedding::vector(384))  vector_cosine_ops)
+  WITH (m = 16, ef_construction = 128) WHERE dimensions = 384  AND is_active;
+CREATE INDEX IF NOT EXISTS emb_hnsw_768  ON content.chunk_embeddings USING hnsw ((embedding::vector(768))  vector_cosine_ops)
+  WITH (m = 16, ef_construction = 128) WHERE dimensions = 768  AND is_active;
+CREATE INDEX IF NOT EXISTS emb_hnsw_1024 ON content.chunk_embeddings USING hnsw ((embedding::vector(1024)) vector_cosine_ops)
+  WITH (m = 16, ef_construction = 128) WHERE dimensions = 1024 AND is_active;
+CREATE INDEX IF NOT EXISTS emb_hnsw_1536 ON content.chunk_embeddings USING hnsw ((embedding::vector(1536)) vector_cosine_ops)
+  WITH (m = 16, ef_construction = 128) WHERE dimensions = 1536 AND is_active;
+CREATE INDEX IF NOT EXISTS emb_tenant_chunk  ON content.chunk_embeddings (tenant_id, chunk_id);
+CREATE INDEX IF NOT EXISTS emb_tenant_doc    ON content.chunk_embeddings (tenant_id, document_id);
+CREATE INDEX IF NOT EXISTS emb_allow_gin     ON content.chunk_embeddings USING gin (allow_principals);
+
+-- Catalogue
+CREATE INDEX IF NOT EXISTS documents_scope      ON content.documents (tenant_id, collection_id, lifecycle_state);
+CREATE INDEX IF NOT EXISTS documents_checksum   ON content.documents (tenant_id, checksum_sha256);
+CREATE INDEX IF NOT EXISTS documents_allow_gin  ON content.documents USING gin (allow_principals);
+CREATE INDEX IF NOT EXISTS documents_title_trgm ON content.documents USING gin (title gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS versions_asof        ON content.document_versions (tenant_id, document_id, effective_from, effective_to);
+CREATE INDEX IF NOT EXISTS versions_checksum    ON content.document_versions (tenant_id, checksum_sha256);
+CREATE INDEX IF NOT EXISTS doc_access_doc       ON content.document_access (tenant_id, document_id);
+CREATE INDEX IF NOT EXISTS doc_access_principal ON content.document_access (tenant_id, principal_id);
+CREATE INDEX IF NOT EXISTS coll_access_coll     ON content.collection_access (tenant_id, collection_id);
+CREATE INDEX IF NOT EXISTS coll_access_principal ON content.collection_access (tenant_id, principal_id);
+CREATE INDEX IF NOT EXISTS metadata_key_value   ON content.document_metadata (tenant_id, key, value);
+
+-- Identity
+CREATE INDEX IF NOT EXISTS users_status        ON iam.users (tenant_id, status);
+CREATE INDEX IF NOT EXISTS users_department    ON iam.users (tenant_id, department_id);
+CREATE INDEX IF NOT EXISTS memberships_account ON iam.tenant_memberships (account_id);
+CREATE INDEX IF NOT EXISTS ugm_user            ON iam.user_group_members (tenant_id, user_id);
+CREATE INDEX IF NOT EXISTS user_roles_role     ON iam.user_roles (tenant_id, role_id);
+CREATE INDEX IF NOT EXISTS sessions_account    ON iam.sessions (account_id, revoked_at);
+CREATE INDEX IF NOT EXISTS sessions_tenant     ON iam.sessions (tenant_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS login_events_account ON iam.login_events (account_id, occurred_at DESC);
+
+-- Ingestion work queue
+CREATE INDEX IF NOT EXISTS jobs_queue      ON ingest.ingestion_jobs (status, priority, queued_at) WHERE status IN ('queued', 'running', 'retrying');
+CREATE INDEX IF NOT EXISTS jobs_document   ON ingest.ingestion_jobs (tenant_id, document_id);
+CREATE INDEX IF NOT EXISTS jobs_tenant_time ON ingest.ingestion_jobs (tenant_id, queued_at DESC);
+CREATE INDEX IF NOT EXISTS job_logs_job    ON ingest.ingestion_job_logs (tenant_id, job_id, created_at);
+
+-- Platform
+CREATE INDEX IF NOT EXISTS paudit_time     ON platform.platform_audit_logs USING brin (occurred_at);
+CREATE INDEX IF NOT EXISTS paudit_tenant   ON platform.platform_audit_logs (target_tenant_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS paudit_category ON platform.platform_audit_logs (category, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS bg_active       ON platform.break_glass_grants (account_id, tenant_id) WHERE status = 'active';

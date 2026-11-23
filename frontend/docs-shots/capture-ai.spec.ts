@@ -1,0 +1,67 @@
+import { expect, test, type Page } from '@playwright/test'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { installFake, state } from './fakeBackend'
+
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const OUT = path.resolve(HERE, '../../docs/user-guide/images-ai')
+const shot = async (p: Page, name: string, _full = false) => {
+  await p.evaluate(() => document.documentElement.setAttribute('data-hide-toasts', '1'))
+  await p.screenshot({ path: path.join(OUT, `${name}.png`), clip: { x: 256, y: 0, width: 1024, height: 1100 } })
+  await p.evaluate(() => document.documentElement.removeAttribute('data-hide-toasts'))
+}
+
+test('capture AI and RAG configuration screenshots', async ({ page: p }) => {
+  state.users.push({ user_id: 'u-alice', persona: 'alice', email: 'alice.admin@acme.example', display_name: 'Alice Admin', user_type: 'employee', department_id: null, roles: ['tenant_admin'], status: 'active', lines_of_business: [], jurisdictions: ['*'], clearance_rank: 3, group_ids: [], last_active_at: null })
+  await p.setViewportSize({ width: 1280, height: 1100 })
+  await installFake(p)
+  await p.addInitScript(() => { const st = document.createElement('style'); st.textContent = 'html[data-hide-toasts] [data-sonner-toaster]{visibility:hidden !important}'; document.addEventListener('DOMContentLoaded', () => document.head.appendChild(st)) })
+  await p.goto('/login')
+  await p.getByLabel('Email').fill('alice.admin@acme.example')
+  await p.getByLabel('Password').fill('Sample-Passw0rd!')
+  await p.getByRole('button', { name: 'Sign in' }).click()
+  await expect(p.getByRole('heading', { name: /Welcome/ })).toBeVisible()
+  await p.getByRole('link', { name: 'Admin', exact: true }).click()
+  await p.getByRole('navigation', { name: /navigation$/ }).first().getByRole('link', { name: 'AI & RAG configuration', exact: true }).click()
+  await expect(p.getByRole('heading', { name: 'AI and RAG configuration' })).toBeVisible()
+  await p.waitForTimeout(600)
+  await shot(p, 'a1-models-tab')
+
+  // switch to the local Ollama servers
+  await p.getByLabel('Chat provider').selectOption({ label: 'ollama-chat' })
+  await p.getByLabel('Chat model').selectOption({ label: 'llama3.1:8b' })
+  await p.getByLabel('Embedding provider').selectOption({ label: 'ollama-embed' })
+  await p.getByLabel('Embedding model').selectOption({ label: 'nomic-embed-text' })
+  await p.getByLabel('Embedding dimensions').fill('768')
+  await p.getByLabel('Temperature').fill('0.1')
+  await p.getByLabel('Reason for change').fill('Use local Ollama models for chat and embeddings')
+  await p.waitForTimeout(300)
+  await shot(p, 'a2-models-edited', true)
+  await p.getByRole('button', { name: 'Save new version' }).click()
+  await expect(p.getByRole('dialog')).toBeVisible()
+  await p.waitForTimeout(300)
+  await shot(p, 'a3-embedding-warning')
+  await p.getByRole('button', { name: 'Save and require re-index' }).click()
+  await expect(p.getByText('AI configuration saved as a new version.')).toBeVisible()
+  await p.waitForTimeout(500)
+  await shot(p, 'a4-models-saved')
+
+  await p.getByRole('tab', { name: 'Retrieval' }).click()
+  await p.waitForTimeout(400)
+  await shot(p, 'a5-retrieval-tab', true)
+  await p.getByLabel('Final top-k').fill('8')
+  await p.getByLabel('Reason for change').fill('Return 8 passages for longer answers')
+  await p.getByRole('button', { name: 'Save new version' }).click()
+  await expect(p.getByText('Retrieval configuration saved as a new version.')).toBeVisible()
+  await p.getByRole('tab', { name: 'Guardrails' }).click()
+  await p.waitForTimeout(400)
+  await shot(p, 'a6-guardrails')
+  await p.getByRole('tab', { name: 'History' }).click()
+  await p.waitForTimeout(500)
+  await shot(p, 'a7-history-retrieval')
+  await p.getByLabel('Compare version 2').check()
+  await p.getByLabel('Compare version 1').check()
+  await p.getByRole('button', { name: 'Compare selected' }).click()
+  await p.waitForTimeout(400)
+  await shot(p, 'a8-history-compare')
+})
